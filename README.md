@@ -1,0 +1,124 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+
+// ========== 你只需要改這兩個地方（如果需要） ==========
+const char* ssid = "OPPOQOO";          // 你的 WiFi 名稱
+const char* password = "02190923";     // 你的 WiFi 密碼
+// ===================================================
+
+const char* mqtt_server = "broker.mqttdashboard.com";
+const int mqtt_port = 1883;
+const char* mqtt_topic = "/666";
+const char* trigger_message = "aaaaa";   // 你要收到的密碼（五個a）
+
+// LINE 設定（你已提供，直接使用）
+const char* line_token = "UySToVZEbuCTJzWrXC8qI+zPdWpg7KshkkMiwFi6bjwT3vTddY3WyQ4z0iY6x42iJN1aHshn5C8qbBWu/9H/gxmbERq1TpSRJNAUhryh0J+14dBO1P6yQQw6RwFJ+d0HC7yI6mWYXF8A93BEK7yd6gdB04t89/1O/w1cDnyilFU=";
+const char* line_user_id = "U8a6bd41ab087a9b07c2959a2f250e2e5";
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// 發送 LINE 訊息（用 HTTPS，忽略憑證檢查）
+void sendLineMessage(const String& text) {
+  HTTPClient https;
+  WiFiClientSecure client;
+  client.setInsecure();   // 跳過憑證驗證（解決時間不同步問題）
+
+  String url = "https://api.line.me/v2/bot/message/push";
+  if (!https.begin(client, url)) {
+    Serial.println("❌ 連線 LINE API 失敗");
+    return;
+  }
+
+  https.addHeader("Content-Type", "application/json");
+  https.addHeader("Authorization", "Bearer " + String(line_token));
+
+  // 建立 JSON 內容
+  StaticJsonDocument<256> doc;
+  doc["to"] = line_user_id;
+  JsonArray messages = doc.createNestedArray("messages");
+  JsonObject msg = messages.createNestedObject();
+  msg["type"] = "text";
+  msg["text"] = text;
+
+  String requestBody;
+  serializeJson(doc, requestBody);
+
+  Serial.print("📤 發送 LINE 訊息... ");
+  int httpCode = https.POST(requestBody);
+  if (httpCode == 200) {
+    Serial.println("成功！");
+  } else {
+    Serial.printf("失敗，HTTP 代碼: %d\n", httpCode);
+    String resp = https.getString();
+    Serial.println("回應內容: " + resp);
+  }
+  https.end();
+}
+
+// MQTT 收到訊息時的處理
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // 將 payload 轉為字串（去除尾端換行、空白）
+  String message = "";
+  for (unsigned int i = 0; i < length; i++) {
+    char c = (char)payload[i];
+    if (c >= 32) message += c;   // 只保留可列印字元
+  }
+  message.trim();   // 移除頭尾空白/換行
+
+  Serial.print("📨 收到 MQTT 主題: ");
+  Serial.print(topic);
+  Serial.print("  內容: \"");
+  Serial.print(message);
+  Serial.println("\"");
+
+  // 檢查主題和內容是否正確
+  if (String(topic) == mqtt_topic && message == trigger_message) {
+    Serial.println("🔑 密碼正確！立即發送 LINE 通知...");
+    sendLineMessage("✅ MQTT 驗證成功！設備已觸發 LINE 通知。");
+  } else {
+    Serial.println("❌ 條件不符，不發送 LINE");
+  }
+}
+
+void connectWiFi() {
+  Serial.print("📡 連線 WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi 已連線，IP: " + WiFi.localIP().toString());
+}
+
+void connectMQTT() {
+  while (!mqttClient.connected()) {
+    Serial.print("🔌 連接 MQTT...");
+    String clientId = "ESP32_" + String(random(0xffff), HEX);
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("成功");
+      mqttClient.subscribe(mqtt_topic);
+      Serial.printf("📡 已訂閱主題: %s\n", mqtt_topic);
+    } else {
+      Serial.printf("失敗 rc=%d，5秒後重試\n", mqttClient.state());
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  randomSeed(analogRead(0));
+  connectWiFi();
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+}
+
+void loop() {
+  if (!mqttClient.connected()) connectMQTT();
+  mqttClient.loop();
+  delay(10);
+}
