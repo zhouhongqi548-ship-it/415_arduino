@@ -1,0 +1,182 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+#include <ESP32Servo.h>
+
+// ========== WiFi 設定（可自行修改） ==========
+const char* ssid = "OPPOQOO";          // 你的 WiFi 名稱
+const char* password = "02190923";     // 你的 WiFi 密碼
+// ============================================
+
+// ========== MQTT 設定 ==========
+const char* mqtt_server = "broker.mqttdashboard.com";
+const int mqtt_port = 1883;
+const char* mqtt_topic = "/666";
+
+// ========== LINE 設定（沿用 may25a） ==========
+const char* line_token = "UySToVZEbuCTJzWrXC8qI+zPdWpg7KshkkMiwFi6bjwT3vTddY3WyQ4z0iY6x42iJN1aHshn5C8qbBWu/9H/gxmbERq1TpSRJNAUhryh0J+14dBO1P6yQQw6RwFJ+d0HC7yI6mWYXF8A93BEK7yd6gdB04t89/1O/w1cDnyilFU=";
+const char* line_user_id = "U8a6bd41ab087a9b07c2959a2f250e2e5";
+
+// ========== 硬體腳位定義 ==========
+const int trigPin = 12;
+const int echoPin = 14;
+const int ledPin = 16;
+const int servoPin = 13;
+
+Servo myservo;
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// ========== 發送 LINE 訊息（來自 may25a） ==========
+void sendLineMessage(const String& text) {
+  HTTPClient https;
+  WiFiClientSecure client;
+  client.setInsecure();   // 跳過憑證驗證
+
+  String url = "https://api.line.me/v2/bot/message/push";
+  if (!https.begin(client, url)) {
+    Serial.println("❌ 連線 LINE API 失敗");
+    return;
+  }
+
+  https.addHeader("Content-Type", "application/json");
+  https.addHeader("Authorization", "Bearer " + String(line_token));
+
+  StaticJsonDocument<256> doc;
+  doc["to"] = line_user_id;
+  JsonArray messages = doc.createNestedArray("messages");
+  JsonObject msg = messages.createNestedObject();
+  msg["type"] = "text";
+  msg["text"] = text;
+
+  String requestBody;
+  serializeJson(doc, requestBody);
+
+  Serial.print("📤 發送 LINE 訊息... ");
+  int httpCode = https.POST(requestBody);
+  if (httpCode == 200) {
+    Serial.println("成功！");
+  } else {
+    Serial.printf("失敗，HTTP 代碼: %d\n", httpCode);
+    String resp = https.getString();
+    Serial.println("回應內容: " + resp);
+  }
+  https.end();
+}
+
+// ========== MQTT 回呼函式（合併兩者邏輯） ==========
+void callback(char* topic, byte* payload, unsigned int length) {
+  String mqtttopic = String(topic);
+  String mqttmessage = "";
+  for (unsigned int i = 0; i < length; i++) {
+    mqttmessage += (char)payload[i];
+  }
+  mqttmessage.trim();
+
+  Serial.print("📨 收到 MQTT 主題: ");
+  Serial.print(mqtttopic);
+  Serial.print("  內容: \"");
+  Serial.print(mqttmessage);
+  Serial.println("\"");
+
+  if (mqtttopic == mqtt_topic) {
+    // ---- 伺服馬達控制（來自 may25b）----
+    if (mqttmessage == "aaaa") {
+      myservo.write(90);
+      Serial.println("🔄 伺服馬達轉到 90 度");
+    } else {
+      myservo.write(0);
+      Serial.println("🔄 伺服馬達轉到 0 度");
+    }
+
+    // ---- LINE 通知（來自 may25a）----
+    if (mqttmessage == "aaaaa") {
+      Serial.println("🔑 收到五個 a，發送 LINE 通知...");
+      sendLineMessage("✅ MQTT 驗證成功！設備已觸發 LINE 通知。");
+    }
+  }
+}
+
+// ========== WiFi 連線 ==========
+void connectWiFi() {
+  Serial.print("📡 連線 WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi 已連線，IP: " + WiFi.localIP().toString());
+}
+
+// ========== MQTT 連線 ==========
+void connectMQTT() {
+  while (!mqttClient.connected()) {
+    Serial.print("🔌 連接 MQTT...");
+    String clientId = "ESP32_" + String(random(0xffff), HEX);
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("成功");
+      mqttClient.subscribe(mqtt_topic);
+      Serial.printf("📡 已訂閱主題: %s\n", mqtt_topic);
+    } else {
+      Serial.printf("失敗 rc=%d，5秒後重試\n", mqttClient.state());
+      delay(5000);
+    }
+  }
+}
+
+// ========== 超音波測距（回傳距離 cm） ==========
+float getDistance() {
+  pinMode(trigPin, OUTPUT);
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  pinMode(echoPin, INPUT);
+  long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout
+  if (duration == 0) return 999.0; // 無效值
+  return duration / 58.0; // 換算為 cm
+}
+
+// ========== setup ==========
+void setup() {
+  Serial.begin(115200);      // 與 may25b 的 9600 不同，統一用 115200 較快
+  randomSeed(analogRead(0));
+
+  // 硬體初始化
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+  myservo.attach(servoPin);
+  myservo.write(0);          // 初始角度 0
+
+  connectWiFi();
+  mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(callback);
+  connectMQTT();
+
+  Serial.println("系統就緒，開始運作");
+}
+
+// ========== loop ==========
+void loop() {
+  // 維持 MQTT 連線與處理訊息
+  if (!mqttClient.connected()) connectMQTT();
+  mqttClient.loop();
+
+  // 超音波測距 + LED 控制（每 100ms）
+  float distance = getDistance();
+  Serial.print("📏 距離: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+
+  if (distance < 10.0) {
+    digitalWrite(ledPin, HIGH);
+    Serial.println("💡 LED 亮起 (距離 < 10cm)");
+  } else {
+    digitalWrite(ledPin, LOW);
+  }
+
+  delay(100);   // 控制測量頻率
+}
